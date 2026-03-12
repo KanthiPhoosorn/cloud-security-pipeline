@@ -203,7 +203,7 @@ resource "aws_sfn_state_machine" "remediation" {
         Type     = "Task"
         Resource = "arn:aws:states:::lambda:invoke.waitForTaskToken"
         Parameters = {
-          FunctionName = aws_lambda_function.parse_finding.arn
+          FunctionName = aws_lambda_function.notify_slack.arn
           Payload = {
             "action"      = "notify"
             "input.$"     = "$"
@@ -211,6 +211,7 @@ resource "aws_sfn_state_machine" "remediation" {
           }
         }
         TimeoutSeconds = 3600
+        ResultPath     = "$.approval"
         Next           = "AutoRemediate"
         Catch = [{
           ErrorEquals = ["States.TaskTimedOut"]
@@ -256,4 +257,94 @@ resource "aws_cloudwatch_event_target" "sfn_target" {
   rule     = aws_cloudwatch_event_rule.prowler_findings.name
   arn      = aws_sfn_state_machine.remediation.arn
   role_arn = aws_iam_role.eventbridge_role.arn
+}
+
+# ─────────────────────────────────────────
+# SSM Permission for Lambda
+# ─────────────────────────────────────────
+resource "aws_iam_role_policy" "lambda_ssm_policy" {
+  name = "remediation-lambda-ssm-policy"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameter"]
+      Resource = "arn:aws:ssm:ap-southeast-1:951510214540:parameter/cloud-security-pipeline/*"
+    }]
+  })
+}
+
+# ─────────────────────────────────────────
+# Lambda — Slack notification
+# ─────────────────────────────────────────
+data "archive_file" "notify_slack" {
+  type        = "zip"
+  source_file = "${path.module}/../../lambda/remediation/notify_slack.py"
+  output_path = "${path.module}/../../lambda/remediation/notify_slack.zip"
+}
+
+resource "aws_lambda_function" "notify_slack" {
+  filename         = data.archive_file.notify_slack.output_path
+  function_name    = "notify-slack"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "notify_slack.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.notify_slack.output_base64sha256
+  timeout          = 30
+}
+
+# ─────────────────────────────────────────
+# Lambda — Slack callback
+# ─────────────────────────────────────────
+data "archive_file" "slack_callback" {
+  type        = "zip"
+  source_file = "${path.module}/../../lambda/remediation/slack_callback.py"
+  output_path = "${path.module}/../../lambda/remediation/slack_callback.zip"
+}
+
+resource "aws_lambda_function" "slack_callback" {
+  filename         = data.archive_file.slack_callback.output_path
+  function_name    = "slack-callback"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "slack_callback.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.slack_callback.output_base64sha256
+  timeout          = 30
+}
+
+# ─────────────────────────────────────────
+# API Gateway — Slack webhook endpoint
+# ─────────────────────────────────────────
+resource "aws_apigatewayv2_api" "slack_api" {
+  name          = "slack-callback-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "slack_integration" {
+  api_id             = aws_apigatewayv2_api.slack_api.id
+  integration_type   = "AWS_PROXY"
+  integration_uri    = aws_lambda_function.slack_callback.invoke_arn
+  integration_method = "POST"
+}
+
+resource "aws_apigatewayv2_route" "slack_route" {
+  api_id    = aws_apigatewayv2_api.slack_api.id
+  route_key = "POST /slack/callback"
+  target    = "integrations/${aws_apigatewayv2_integration.slack_integration.id}"
+}
+
+resource "aws_apigatewayv2_stage" "slack_stage" {
+  api_id      = aws_apigatewayv2_api.slack_api.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_lambda_permission" "slack_api_permission" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.slack_callback.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.slack_api.execution_arn}/*/*"
 }
