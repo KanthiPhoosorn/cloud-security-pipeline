@@ -59,7 +59,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "ec2:DescribeSecurityGroups",
           "ec2:RevokeSecurityGroupIngress",
           "s3:GetBucketPublicAccessBlock",
-          "s3:PutPublicAccessBlock",
+          "s3:PutBucketPublicAccessBlock",
           "iam:GetPolicy",
           "iam:GetPolicyVersion",
           "iam:CreatePolicyVersion",
