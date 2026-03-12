@@ -315,11 +315,5 @@ Software Engineering Student — Mae Fah Luang University, Thailand
 - 🔗 [LinkedIn](https://linkedin.com/in/kanthi-phoosorn-238644392)
 - 🐙 [GitHub](https://github.com/KanthiPhoosorn)
 - 🛡️ [TryHackMe](https://tryhackme.com/p/7083343)
-- 📜 Google Cybersecurity Certificate — `coursera.org/verify/9C6XUE70WV0Q`
 
 ---
-
-## 🎯 Target
-
-MSc Cybersecurity — Georgia Tech 🇺🇸 (August 2028)
-Career Goal: Cloud Security Engineer ($140K–$180K)
