@@ -224,10 +224,19 @@ resource "aws_sfn_state_machine" "remediation" {
       AutoRemediate = {
         Type     = "Task"
         Resource = aws_lambda_function.remediate.arn
-        Next     = "Succeeded"
+        Next     = "AuditLog"
         Catch = [{
           ErrorEquals = ["States.ALL"]
           Next        = "Failed"
+        }]
+      }
+      AuditLog = {
+        Type     = "Task"
+        Resource = aws_lambda_function.audit_logger.arn
+        Next     = "Succeeded"
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "Succeeded"
         }]
       }
       Succeeded = {
@@ -350,4 +359,23 @@ resource "aws_lambda_permission" "slack_api_permission" {
   function_name = aws_lambda_function.slack_callback.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.slack_api.execution_arn}/*/*"
+}
+
+# ─────────────────────────────────────────
+# Lambda — Audit Logger
+# ─────────────────────────────────────────
+data "archive_file" "audit_logger" {
+  type        = "zip"
+  source_file = "${path.module}/../../lambda/remediation/audit_logger.py"
+  output_path = "${path.module}/../../lambda/remediation/audit_logger.zip"
+}
+
+resource "aws_lambda_function" "audit_logger" {
+  filename         = data.archive_file.audit_logger.output_path
+  function_name    = "audit-logger"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "audit_logger.lambda_handler"
+  runtime          = "python3.12"
+  source_code_hash = data.archive_file.audit_logger.output_base64sha256
+  timeout          = 30
 }
