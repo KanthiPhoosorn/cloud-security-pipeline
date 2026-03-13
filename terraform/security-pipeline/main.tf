@@ -11,6 +11,11 @@ provider "aws" {
   region = "ap-southeast-1"
 }
 
+locals {
+  account_id = "951510214540"
+  region     = "ap-southeast-1"
+}
+
 resource "aws_dynamodb_table" "remediation_state" {
   name         = "remediation-state"
   billing_mode = "PAY_PER_REQUEST"
@@ -45,21 +50,47 @@ resource "aws_iam_role_policy" "lambda_policy" {
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "Logging"
         Effect = "Allow"
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/lambda/*"
       },
       {
+        Sid    = "EC2Remediation"
         Effect = "Allow"
         Action = [
           "ec2:DescribeSecurityGroups",
           "ec2:RevokeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupEgress"
+        ]
+        Resource = "arn:aws:ec2:${local.region}:${local.account_id}:security-group/*"
+      },
+      {
+        Sid    = "EC2Describe"
+        Effect = "Allow"
+        Action = ["ec2:DescribeSecurityGroups"]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "aws:RequestedRegion" = local.region }
+        }
+      },
+      {
+        Sid    = "S3Remediation"
+        Effect = "Allow"
+        Action = [
           "s3:GetBucketPublicAccessBlock",
-          "s3:PutBucketPublicAccessBlock",
+          "s3:PutBucketPublicAccessBlock"
+        ]
+        Resource = "arn:aws:s3:::*"
+      },
+      {
+        Sid    = "IAMRemediation"
+        Effect = "Allow"
+        Action = [
           "iam:GetPolicy",
           "iam:GetPolicyVersion",
           "iam:CreatePolicyVersion",
@@ -67,13 +98,36 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "iam:ListPolicyVersions",
           "iam:ListRolePolicies",
           "iam:GetRolePolicy",
-          "iam:PutRolePolicy",
+          "iam:PutRolePolicy"
+        ]
+        Resource = [
+          "arn:aws:iam::${local.account_id}:role/*",
+          "arn:aws:iam::${local.account_id}:policy/*"
+        ]
+      },
+      {
+        Sid    = "DynamoDB"
+        Effect = "Allow"
+        Action = [
           "dynamodb:PutItem",
-          "dynamodb:GetItem",
+          "dynamodb:GetItem"
+        ]
+        Resource = "arn:aws:dynamodb:${local.region}:${local.account_id}:table/remediation-state"
+      },
+      {
+        Sid    = "StepFunctions"
+        Effect = "Allow"
+        Action = [
           "states:SendTaskSuccess",
           "states:SendTaskFailure"
         ]
-        Resource = "*"
+        Resource = "arn:aws:states:${local.region}:${local.account_id}:stateMachine:remediation-pipeline"
+      },
+      {
+        Sid    = "SSM"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = "arn:aws:ssm:${local.region}:${local.account_id}:parameter/cloud-security-pipeline/*"
       }
     ]
   })
@@ -98,16 +152,29 @@ resource "aws_iam_role_policy" "sfn_policy" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "lambda:InvokeFunction",
-        "logs:CreateLogGroup",
-        "logs:CreateLogDelivery",
-        "logs:PutLogEvents"
-      ]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        Sid    = "InvokeLambda"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = [
+          "arn:aws:lambda:${local.region}:${local.account_id}:function:parse-finding",
+          "arn:aws:lambda:${local.region}:${local.account_id}:function:remediate-finding",
+          "arn:aws:lambda:${local.region}:${local.account_id}:function:notify-slack",
+          "arn:aws:lambda:${local.region}:${local.account_id}:function:audit-logger"
+        ]
+      },
+      {
+        Sid    = "Logging"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogDelivery",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${local.region}:${local.account_id}:log-group:/aws/states/*"
+      }
+    ]
   })
 }
 
@@ -131,6 +198,7 @@ resource "aws_iam_role_policy" "eventbridge_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
+      Sid      = "StartSFN"
       Effect   = "Allow"
       Action   = ["states:StartExecution"]
       Resource = aws_sfn_state_machine.remediation.arn
@@ -239,9 +307,7 @@ resource "aws_sfn_state_machine" "remediation" {
           Next        = "Succeeded"
         }]
       }
-      Succeeded = {
-        Type = "Succeed"
-      }
+      Succeeded = { Type = "Succeed" }
       Failed = {
         Type  = "Fail"
         Error = "RemediationFailed"
@@ -259,7 +325,7 @@ resource "aws_cloudwatch_event_rule" "prowler_findings" {
     source      = ["aws.s3"]
     detail-type = ["Object Created"]
     detail = {
-      bucket = { name = ["prowler-findings-951510214540"] }
+      bucket = { name = ["prowler-findings-${local.account_id}"] }
       object = { key = [{ suffix = ".json" }] }
     }
   })
@@ -271,26 +337,6 @@ resource "aws_cloudwatch_event_target" "sfn_target" {
   role_arn = aws_iam_role.eventbridge_role.arn
 }
 
-# ─────────────────────────────────────────
-# SSM Permission for Lambda
-# ─────────────────────────────────────────
-resource "aws_iam_role_policy" "lambda_ssm_policy" {
-  name = "remediation-lambda-ssm-policy"
-  role = aws_iam_role.lambda_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameter"]
-      Resource = "arn:aws:ssm:ap-southeast-1:951510214540:parameter/cloud-security-pipeline/*"
-    }]
-  })
-}
-
-# ─────────────────────────────────────────
-# Lambda — Slack notification
-# ─────────────────────────────────────────
 data "archive_file" "notify_slack" {
   type        = "zip"
   source_file = "${path.module}/../../lambda/remediation/notify_slack.py"
@@ -307,9 +353,6 @@ resource "aws_lambda_function" "notify_slack" {
   timeout          = 30
 }
 
-# ─────────────────────────────────────────
-# Lambda — Slack callback
-# ─────────────────────────────────────────
 data "archive_file" "slack_callback" {
   type        = "zip"
   source_file = "${path.module}/../../lambda/remediation/slack_callback.py"
@@ -326,9 +369,6 @@ resource "aws_lambda_function" "slack_callback" {
   timeout          = 30
 }
 
-# ─────────────────────────────────────────
-# API Gateway — Slack webhook endpoint
-# ─────────────────────────────────────────
 resource "aws_apigatewayv2_api" "slack_api" {
   name          = "slack-callback-api"
   protocol_type = "HTTP"
@@ -361,9 +401,6 @@ resource "aws_lambda_permission" "slack_api_permission" {
   source_arn    = "${aws_apigatewayv2_api.slack_api.execution_arn}/*/*"
 }
 
-# ─────────────────────────────────────────
-# Lambda — Audit Logger
-# ─────────────────────────────────────────
 data "archive_file" "audit_logger" {
   type        = "zip"
   source_file = "${path.module}/../../lambda/remediation/audit_logger.py"
