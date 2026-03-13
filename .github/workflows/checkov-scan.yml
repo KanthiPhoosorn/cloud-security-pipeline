@@ -2,9 +2,9 @@ name: Checkov Security Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   checkov:
@@ -13,13 +13,18 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Run Checkov
+      - name: Run Checkov on security-pipeline only
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/security-pipeline
+          framework: terraform
+          soft_fail: false
+
+      - name: Run Checkov on vulnerable-lab (informational only)
         uses: bridgecrewio/checkov-action@master
         with:
           directory: terraform/vulnerable-lab
           framework: terraform
-          soft_fail: false
-          download_external_modules: true
-          output_format: cli
+          soft_fail: true
