@@ -24,7 +24,7 @@ A production-grade automated security pipeline that:
 
 ---
 
-## 🏗️ Architecture — Layer View
+## 🏗️ Architecture
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  DEVELOPER WORKFLOW                                             │
@@ -45,14 +45,13 @@ A production-grade automated security pipeline that:
            │ notify            │ approved
 ┌──────────▼──────────┐        │
 │  SLACK APPROVAL     │        │
-│  notify-slack       │        │
 │  #all-cloud-security│        │
 │  API GW + callback ─┼────────┘
 └─────────────────────┘
 ┌─────────────────────────────────────────────────────────────────┐
 │  REMEDIATION LAMBDAS                                            │
-│  Security Group          IAM Role            S3 Bucket          │
-│  revoke 0.0.0.0/0        replace wildcard    block public access│
+│  Security Group     IAM Role            S3 Bucket               │
+│  revoke 0.0.0.0/0   replace wildcard    block public access     │
 └──────────────────────────────┬──────────────────────────────────┘
                                │ write status
 ┌──────────────────────────────▼──────────────────────────────────┐
@@ -64,82 +63,74 @@ A production-grade automated security pipeline that:
 
 ---
 
-## 🏗️ Architecture — Detailed Flow
+## 🔄 Detailed Flow
 ```mermaid
-flowchart TD
-    subgraph DEV["🖥️ Developer Workstation"]
-        TF["Terraform IaC"]
-        GH["GitHub Push"]
+flowchart LR
+    classDef dev   fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef aws   fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef sfn   fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef slack fill:#fff3e0,stroke:#e65100,color:#bf360c
+    classDef fix   fill:#fce4ec,stroke:#880e4f,color:#560027
+    classDef audit fill:#f1f8e9,stroke:#558b2f,color:#33691e
+
+    subgraph COL1["🖥️ Dev"]
+        TF["Terraform\nIaC"]
+        GH["GitHub\nPush"]
+        CK["Checkov\n3.2.508"]
+        PR["Prowler\n3.11.3"]
+        TF --> GH --> CK --> PR
     end
 
-    subgraph CICD["⚙️ CI/CD — GitHub Actions"]
-        CK["Checkov 3.2.508\nIaC Static Analysis"]
-        CK -->|"❌ Fail"| BLOCK["Block Push"]
-        CK -->|"✅ Pass"| DEPLOY["Allow Deploy"]
+    subgraph COL2["☁️ AWS Detection"]
+        S3F["S3 Bucket\nprowler-findings-*"]
+        EB["EventBridge\nS3 trigger"]
+        SF["Step Functions\nremediation-pipeline"]
+        S3F --> EB --> SF
     end
 
-    subgraph AWS["☁️ AWS ap-southeast-1 — Account 951510214540"]
-        subgraph LAB["🎯 Vulnerable Lab"]
-            EC2["EC2 — IMDSv1"]
-            SG["SG — SSH 0.0.0.0/0"]
-            S3B["S3 — Public ON"]
-            IAM["IAM — Wildcard *"]
-        end
+    subgraph COL3["🔄 State Machine"]
+        P1["ParseFinding λ\nidempotency check"]
+        P2{"Check\nSeverity"}
+        P3["WaitForApproval\nwaitForTaskToken"]
+        P4["AutoRemediate λ"]
+        P1 --> P2
+        P2 -->|"CRITICAL / HIGH"| P3
+        P2 -->|"MEDIUM / LOW"| P4
+        P3 -->|"approved"| P4
+    end
 
-        subgraph DETECT["🔍 Detection"]
-            PR["Prowler 3.11.3"]
-            S3F["S3: prowler-findings-*"]
-            PR -->|"ASFF JSON"| S3F
-        end
+    subgraph COL4["💬 Slack"]
+        SL["#all-cloud-security\n✅ Approve  ❌ Deny"]
+        CB["API Gateway\nslack-callback λ"]
+        SL --> CB
+    end
 
-        subgraph ORCH["🔄 Orchestration"]
-            EB["EventBridge"]
-            SF["Step Functions\nremediation-pipeline"]
-            S3F --> EB --> SF
+    subgraph COL5["🛠️ Remediation"]
+        R1["Security Group\nrevoke 0.0.0.0/0"]
+        R2["IAM Role\nDeny wildcard"]
+        R3["S3 Bucket\nblock public access"]
+    end
 
-            P1["ParseFinding λ"]
-            P2{"CheckSeverity"}
-            P3["WaitForApproval\nwaitForTaskToken 3600s"]
-            P4["AutoRemediate λ"]
-            P5["AuditLog λ"]
-
-            SF --> P1 --> P2
-            P2 -->|"CRITICAL/HIGH"| P3
-            P2 -->|"MEDIUM/LOW"| P4
-            P3 -->|"Approved"| P4
-            P4 --> P5
-        end
-
+    subgraph COL6["🗄️ Audit & Dashboard"]
         DDB["DynamoDB\nremediation-state"]
-        SSM["SSM\nSlack webhook URL"]
+        PG["PostgreSQL 18\ncspm.findings"]
+        DASH["React Dashboard\nCloud Secure Score"]
+        DDB --> PG --> DASH
     end
 
-    subgraph SLACK["💬 Slack"]
-        CH["#all-cloud-security-pipeline\n✅ Approve  ❌ Deny"]
-        APIGW["API Gateway\n/slack/callback"]
-        CBL["slack-callback λ"]
-        APIGW --> CBL -->|"send_task_success"| SF
-    end
+    PR  -->|"ASFF JSON"| S3F
+    SF  --> P1
+    P3  -->|"Block Kit"| SL
+    CB  -->|"send_task_success"| P3
+    P4  --> R1 & R2 & R3
+    P4  --> DDB
 
-    subgraph REMEDIATE["🛠️ Remediation"]
-        RL1["Security Group\nrevoke 0.0.0.0/0"]
-        RL2["IAM Role\nDeny wildcard"]
-        RL3["S3 Bucket\nblock public access"]
-    end
-
-    subgraph AUDIT["🗄️ Audit & Observability"]
-        PG["PostgreSQL 18\ncspm.findings + audit log"]
-        DASH["React Dashboard\nCloud Secure Score + MTTR"]
-        PG --> DASH
-    end
-
-    GH --> CICD
-    TF --> LAB
-    PR --> LAB
-    P3 -->|"Block Kit message"| CH
-    CH -->|"button click"| APIGW
-    P4 --> RL1 & RL2 & RL3
-    P4 --> DDB --> PG
+    class TF,GH,CK,PR dev
+    class S3F,EB,SF aws
+    class P1,P2,P3,P4 sfn
+    class SL,CB slack
+    class R1,R2,R3 fix
+    class DDB,PG,DASH audit
 ```
 
 ---
