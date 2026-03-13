@@ -24,8 +24,47 @@ A production-grade automated security pipeline that:
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture — Layer View
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  DEVELOPER WORKFLOW                                             │
+│  Terraform IaC ──► GitHub Actions (Checkov 3.2.508) ──► Prowler│
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ ASFF findings
+┌──────────────────────────────▼──────────────────────────────────┐
+│  AWS DETECTION LAYER                                            │
+│  S3 (prowler-findings-*) ──► EventBridge ──► Step Functions     │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ start execution
+┌──────────────────────────────▼──────────────────────────────────┐
+│  STATE MACHINE                                                  │
+│  ParseFinding ──► CheckSeverity                                 │
+│                       ├─ CRITICAL/HIGH ──► WaitForApproval      │
+│                       └─ MEDIUM/LOW ────► AutoRemediate         │
+└──────────┬───────────────────┬──────────────────────────────────┘
+           │ notify            │ approved
+┌──────────▼──────────┐        │
+│  SLACK APPROVAL     │        │
+│  notify-slack       │        │
+│  #all-cloud-security│        │
+│  API GW + callback ─┼────────┘
+└─────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  REMEDIATION LAMBDAS                                            │
+│  Security Group          IAM Role            S3 Bucket          │
+│  revoke 0.0.0.0/0        replace wildcard    block public access│
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ write status
+┌──────────────────────────────▼──────────────────────────────────┐
+│  AUDIT & OBSERVABILITY                                          │
+│  DynamoDB ──► PostgreSQL (cspm.findings + audit log) ──► React  │
+│                              Cloud Secure Score + MTTR Dashboard│
+└─────────────────────────────────────────────────────────────────┘
+```
 
+---
+
+## 🏗️ Architecture — Detailed Flow
 ```mermaid
 flowchart TD
     subgraph DEV["🖥️ Developer Workstation"]
@@ -34,104 +73,73 @@ flowchart TD
     end
 
     subgraph CICD["⚙️ CI/CD — GitHub Actions"]
-        CK["Checkov Scanner\nIaC Static Analysis"]
-        CK -->|"❌ Fail on violations"| BLOCK["Block PR/Push"]
+        CK["Checkov 3.2.508\nIaC Static Analysis"]
+        CK -->|"❌ Fail"| BLOCK["Block Push"]
         CK -->|"✅ Pass"| DEPLOY["Allow Deploy"]
     end
 
-    subgraph AWS["☁️ AWS ap-southeast-1"]
+    subgraph AWS["☁️ AWS ap-southeast-1 — Account 951510214540"]
         subgraph LAB["🎯 Vulnerable Lab"]
-            EC2["EC2\nIMDSv1 enabled"]
-            SG["Security Group\nSSH 0.0.0.0/0"]
-            S3B["S3 Bucket\nPublic Access ON"]
-            IAM["IAM Role\nWildcard *"]
+            EC2["EC2 — IMDSv1"]
+            SG["SG — SSH 0.0.0.0/0"]
+            S3B["S3 — Public ON"]
+            IAM["IAM — Wildcard *"]
         end
 
         subgraph DETECT["🔍 Detection"]
-            PR["Prowler 3.11.3\nRuntime Scan"]
-            S3F["S3 Bucket\nprowler-findings-*"]
-            PR -->|"ASFF findings"| S3F
+            PR["Prowler 3.11.3"]
+            S3F["S3: prowler-findings-*"]
+            PR -->|"ASFF JSON"| S3F
         end
 
         subgraph ORCH["🔄 Orchestration"]
-            EB["EventBridge\nS3 Object Created"]
+            EB["EventBridge"]
             SF["Step Functions\nremediation-pipeline"]
-            S3F -->|"trigger"| EB
-            EB -->|"start execution"| SF
+            S3F --> EB --> SF
 
-            subgraph FLOW["State Machine Flow"]
-                P1["ParseFinding\nLambda"]
-                P2{"CheckSeverity"}
-                P3["WaitForApproval\nwaitForTaskToken"]
-                P4["AutoRemediate\nLambda"]
-                P5["AuditLog\nLambda"]
-                P6(["✅ Succeeded"])
-                P7(["❌ Failed"])
+            P1["ParseFinding λ"]
+            P2{"CheckSeverity"}
+            P3["WaitForApproval\nwaitForTaskToken 3600s"]
+            P4["AutoRemediate λ"]
+            P5["AuditLog λ"]
 
-                P1 --> P2
-                P2 -->|"CRITICAL/HIGH"| P3
-                P2 -->|"MEDIUM/LOW"| P4
-                P3 -->|"Approved"| P4
-                P3 -->|"Denied/Timeout"| P7
-                P4 -->|"Success"| P5
-                P4 -->|"Error"| P7
-                P5 --> P6
-            end
-
-            SF --> P1
+            SF --> P1 --> P2
+            P2 -->|"CRITICAL/HIGH"| P3
+            P2 -->|"MEDIUM/LOW"| P4
+            P3 -->|"Approved"| P4
+            P4 --> P5
         end
 
-        subgraph REMEDIATE["🛠️ Remediation Lambdas"]
-            RL1["Security Group\nRevoke 0.0.0.0/0"]
-            RL2["IAM Role\nRemove wildcards"]
-            RL3["S3 Bucket\nBlock public access"]
-        end
-
-        subgraph STORE["💾 Storage"]
-            DDB["DynamoDB\nremediation-state"]
-            SSM["SSM Parameter Store\nSlack webhook URL"]
-        end
-
-        subgraph API["🌐 API Gateway"]
-            APIGW["HTTP API\n/slack/callback"]
-            CBL["slack-callback\nLambda"]
-            APIGW --> CBL
-        end
+        DDB["DynamoDB\nremediation-state"]
+        SSM["SSM\nSlack webhook URL"]
     end
 
     subgraph SLACK["💬 Slack"]
-        CH["#all-cloud-security-pipeline"]
-        BTN["✅ Approve  ❌ Deny"]
+        CH["#all-cloud-security-pipeline\n✅ Approve  ❌ Deny"]
+        APIGW["API Gateway\n/slack/callback"]
+        CBL["slack-callback λ"]
+        APIGW --> CBL -->|"send_task_success"| SF
     end
 
-    subgraph DB["🗄️ PostgreSQL"]
-        CSPM["cspm.findings\nAll security findings"]
-        AUDIT["audit.remediation_log\nAudit trail trigger"]
-        MTTR["MTTR Query\nAvg remediation time"]
+    subgraph REMEDIATE["🛠️ Remediation"]
+        RL1["Security Group\nrevoke 0.0.0.0/0"]
+        RL2["IAM Role\nDeny wildcard"]
+        RL3["S3 Bucket\nblock public access"]
     end
 
-    subgraph DASH["📊 React Dashboard"]
-        OV["Overview\nSecure Score"]
-        FN["Findings Table"]
-        MT["MTTR Analysis"]
-        CO["Compliance"]
-        AL["Audit Log"]
+    subgraph AUDIT["🗄️ Audit & Observability"]
+        PG["PostgreSQL 18\ncspm.findings + audit log"]
+        DASH["React Dashboard\nCloud Secure Score + MTTR"]
+        PG --> DASH
     end
 
     GH --> CICD
     TF --> LAB
     PR --> LAB
-    P3 -->|"Slack notification\nBlock Kit message"| CH
-    CH --> BTN
-    BTN -->|"POST /slack/callback"| APIGW
-    CBL -->|"send_task_success/failure"| SF
-    P4 --> REMEDIATE
-    P4 --> DDB
-    P5 --> DDB
-    DDB -->|"sync script"| CSPM
-    CSPM --> AUDIT
-    CSPM --> MTTR
-    CSPM --> DASH
+    P3 -->|"Block Kit message"| CH
+    CH -->|"button click"| APIGW
+    P4 --> RL1 & RL2 & RL3
+    P4 --> DDB --> PG
 ```
 
 ---
@@ -154,30 +162,23 @@ flowchart TD
 ---
 
 ## 📁 Project Structure
-
 ```
 cloud-security-pipeline/
 ├── terraform/
 │   ├── vulnerable-lab/          # Intentionally misconfigured AWS resources
-│   │   ├── main.tf              # EC2, SG, S3, IAM with planted vulnerabilities
-│   │   └── outputs.tf
 │   └── security-pipeline/       # Remediation infrastructure
-│       ├── main.tf              # Lambda, Step Functions, EventBridge, API GW
-│       └── outputs.tf
 ├── lambda/
 │   └── remediation/
-│       ├── parse_finding.py     # Parses S3 events + idempotency check
+│       ├── parse_finding.py     # Parses findings + idempotency check
 │       ├── remediate.py         # SG / IAM / S3 remediation logic
-│       ├── notify_slack.py      # Sends Block Kit approval message
-│       ├── slack_callback.py    # Handles Approve/Deny button clicks
-│       ├── audit_logger.py      # Writes findings to PostgreSQL
+│       ├── notify_slack.py      # Block Kit approval message
+│       ├── slack_callback.py    # Approve/Deny handler
+│       ├── audit_logger.py      # PostgreSQL writer
 │       └── sync_to_postgres.py  # DynamoDB → PostgreSQL sync
-├── dashboard-app/               # React cyberpunk security dashboard
-│   └── src/
-│       └── App.js               # 5-tab dashboard with Recharts
-├── .github/
-│   └── workflows/
-│       └── checkov-scan.yml     # CI/CD IaC scanning pipeline
+├── dashboard-app/               # React cyberpunk dashboard
+│   └── src/App.js
+├── .github/workflows/
+│   └── checkov-scan.yml         # CI/CD IaC scanning
 └── prowler-output/
     └── sample-findings.asff.json
 ```
@@ -185,40 +186,19 @@ cloud-security-pipeline/
 ---
 
 ## 🚀 Pipeline Flow
-
 ```
-1. Developer pushes IaC code
-        ↓
-2. GitHub Actions runs Checkov (blocks if violations found)
-        ↓
-3. Terraform deploys vulnerable lab (for testing)
-        ↓
-4. Prowler scans AWS account → outputs ASFF findings → uploads to S3
-        ↓
-5. EventBridge detects S3 upload → triggers Step Functions
-        ↓
-6. ParseFinding Lambda extracts resource details + idempotency check
-        ↓
-7. CheckSeverity routes:
-   CRITICAL/HIGH  → Slack approval required
-   MEDIUM/LOW     → Auto-remediate immediately
-        ↓
-8. Slack message sent with ✅ Approve / ❌ Deny buttons
-        ↓
-9. Engineer clicks Approve → API Gateway → slack-callback Lambda
-        ↓
-10. send_task_success() resumes Step Functions
-        ↓
-11. Remediate Lambda fixes the resource:
-    Security Group  → revoke_security_group_ingress (remove 0.0.0.0/0)
-    IAM Role        → put_role_policy (replace Allow:* with Deny:*)
-    S3 Bucket       → put_public_access_block (all 4 flags = true)
-        ↓
-12. DynamoDB records REMEDIATED status + approver
-        ↓
-13. PostgreSQL audit trigger logs all changes automatically
-        ↓
-14. React dashboard shows real-time Cloud Secure Score
+1.  Developer pushes IaC → GitHub Actions runs Checkov (hard gate)
+2.  Terraform deploys vulnerable lab
+3.  Prowler scans AWS → ASFF findings → S3
+4.  EventBridge detects upload → Step Functions triggered
+5.  ParseFinding Lambda → idempotency check via DynamoDB
+6.  CheckSeverity: CRITICAL/HIGH → Slack approval / MEDIUM/LOW → auto
+7.  Slack Block Kit message → engineer clicks ✅ Approve
+8.  API Gateway → slack-callback → send_task_success()
+9.  AutoRemediate Lambda fixes resource
+10. DynamoDB records REMEDIATED + approver
+11. PostgreSQL audit trigger logs all changes
+12. React dashboard shows real-time Cloud Secure Score
 ```
 
 ---
@@ -235,85 +215,51 @@ cloud-security-pipeline/
 
 ---
 
-## 📈 Cloud Secure Score Formula
+## 📈 Cloud Secure Score
 
-$$S_{score} = \max\left(0,\ 100 - \frac{\sum_{i=1}^{N}(V_i \times W_i)}{T_{max}}\right)$$
+Weights: CRITICAL=64, HIGH=16, MEDIUM=4, LOW=1
 
-| Severity | Weight |
-|---|---|
-| CRITICAL | 64 |
-| HIGH | 16 |
-| MEDIUM | 4 |
-| LOW | 1 |
+`Score = max(0, 100 - (sum of open finding weights / total possible) × 100)`
 
 ---
 
 ## 🗄️ Database Schema
-
 ```sql
--- cspm.findings — stores all security findings
 CREATE TABLE cspm.findings (
-    id               SERIAL PRIMARY KEY,
     event_id         VARCHAR(255) UNIQUE NOT NULL,
     check_id         VARCHAR(100),
     severity         VARCHAR(20),
     resource_type    VARCHAR(100),
     resource_id      VARCHAR(255),
-    description      TEXT,
     status           VARCHAR(50),
     discovery_date   TIMESTAMP DEFAULT NOW(),
     remediation_date TIMESTAMP,
     approver         VARCHAR(100)
 );
-
--- MTTR Query
-SELECT severity,
-  AVG(EXTRACT(EPOCH FROM (remediation_date - discovery_date)) / 60) AS avg_mttr_minutes
-FROM cspm.findings
-WHERE remediation_date IS NOT NULL
-GROUP BY severity;
 ```
 
 ---
 
-## 🔧 Setup
-
+## 🔧 Quick Start
 ```bash
-# 1. Clone
 git clone https://github.com/KanthiPhoosorn/cloud-security-pipeline.git
 cd cloud-security-pipeline
-
-# 2. Configure AWS
 aws configure
-
-# 3. Deploy vulnerable lab
-cd terraform/vulnerable-lab
-terraform init && terraform apply
-
-# 4. Deploy security pipeline
-cd ../security-pipeline
-terraform init && terraform apply
-
-# 5. Run Prowler scan
+cd terraform/vulnerable-lab && terraform init && terraform apply
+cd ../security-pipeline && terraform init && terraform apply
 prowler aws -M json-asff -o ./prowler-output
-
-# 6. Upload findings to S3
-aws s3 cp prowler-output/findings.json s3://prowler-findings-ACCOUNT_ID/findings/
-
-# 7. Start dashboard
-cd ../../dashboard-app
-npm install && npm start
+cd ../../dashboard-app && npm install && npm start
 ```
 
 ---
 
 ## 👤 Author
 
-**Kanthi Phoosorn**
-Software Engineering Student — Mae Fah Luang University, Thailand
+**Kanthi Phoosorn** — Software Engineering, Mae Fah Luang University, Thailand
 
 - 🔗 [LinkedIn](https://linkedin.com/in/kanthi-phoosorn-238644392)
 - 🐙 [GitHub](https://github.com/KanthiPhoosorn)
 - 🛡️ [TryHackMe](https://tryhackme.com/p/7083343)
+- 📜 Google Cybersecurity Certificate — `coursera.org/verify/9C6XUE70WV0Q`
 
----
+**Target:** MSc Cybersecurity — Georgia Tech 🇺🇸 (August 2028)
